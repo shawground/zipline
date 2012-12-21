@@ -536,18 +536,31 @@ shares in position"
             "should be -400 for all trades and transactions in period"
         )
 
-    @parameterized.expand([
-                          (datetime.datetime(year=2008,
+    @parameterized.expand(list(itertools.chain(
+
+                          ((start_dt, 0, 0, 0)
+                          for start_dt in
+                          [datetime.datetime(year=2010,
                                              month=10,
                                              day=9,
-                                             tzinfo=pytz.utc),),
-                          (datetime.datetime(year=2010,
-                                             month=10,
-                                             day=9,
-                                             tzinfo=pytz.utc),),
-                          (None,),  # random start_dt
-                          ])
-    def test_tracker(self, start_dt):
+                                             tzinfo=pytz.utc),
+                           None]),  # random start_dt
+
+                          ((datetime.datetime(year=2008,
+                                              month=10,
+                                              day=9,
+                                              tzinfo=pytz.utc),
+                          delete_from_start,
+                          delete_from_middle,
+                          delete_from_end)
+                          for delete_from_start in range(3)
+                          for delete_from_middle in range(3)
+                          for delete_from_end in range(3)))))
+    def test_tracker(self,
+                     start_dt,
+                     delete_from_start,
+                     delete_from_middle,
+                     delete_from_end):
 
         trade_count = 100
         sid = 133
@@ -579,10 +592,9 @@ shares in position"
             source_id="factory2"
         )
 
-        trade_history.extend(trade_history2)
-
-        trading_environment.period_start = trade_history[0].dt
-        trading_environment.period_end = trade_history[-1].dt
+        trading_environment.period_start = \
+            trade_history[0].dt.replace(hour=0, minute=0, second=0)
+        trading_environment.period_end = trade_history2[-1].dt
         trading_environment.first_open = \
             trading_environment.calculate_first_open()
         trading_environment.last_close = \
@@ -598,6 +610,20 @@ shares in position"
             trading_environment
         )
 
+        trade_history = \
+            trade_history[delete_from_start:
+                          len(trade_history) - delete_from_end]
+        trade_history2 = \
+            trade_history2[delete_from_start:
+                           len(trade_history2) - delete_from_end]
+
+        if delete_from_middle:
+            middle = len(trade_history) / 2
+            del trade_history[middle:middle + delete_from_middle]
+            del trade_history2[middle:middle + delete_from_middle]
+
+        trade_history.extend(trade_history2)
+
         # date_sort requires 'DONE' messages from each source
         events = itertools.chain(trade_history,
                                  [ndict({
@@ -611,14 +637,17 @@ shares in position"
                                         'type': DATASOURCE_TYPE.TRADE
                                         })])
         events = date_sort(events, ('factory1', 'factory2'))
-        events = itertools.chain(events,
-                                 [ndict({'dt': 'DONE'})])
+        events = itertools.chain(events, [ndict({'dt': 'DONE'})])
 
-        events = [self.event_with_txn(event, trading_environment)
+        events = [self.event_with_txn(event, trade_history[0].dt)
                   for event in events]
 
-        list(perf_tracker.transform(
-            itertools.groupby(events, attrgetter('dt'))))
+        messages = \
+            [msg for date, snapshot in
+                perf_tracker.transform(
+                    itertools.groupby(events, attrgetter('dt')))
+                for event in snapshot
+                for msg in event.perf_messages]
 
         #we skip two trades, to test case of None transaction
         txn_count = len(trade_history) - 2
@@ -631,11 +660,12 @@ shares in position"
         self.assertEqual(perf_tracker.last_close,
                          perf_tracker.cumulative_risk_metrics.end_date)
 
-    def event_with_txn(self, event, env):
+        self.assertEqual(len(messages), trading_environment.days_in_period)
+
+    def event_with_txn(self, event, no_txn_dt):
         #create a transaction for all but
         #first trade in each sid, to simulate None transaction
-        if event.dt != env.period_start \
-                and event.dt != 'DONE':
+        if event.dt != no_txn_dt and event.dt != 'DONE':
             txn = ndict({
                 'sid': event.sid,
                 'amount': -25,
